@@ -1,73 +1,66 @@
 const express = require('express');
+const axios = require('axios');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const app = express();
 
-const PROXY_PREFIX = '/proxy'; // Proxy URL prefix
-const TARGET_HOST = 'https://share32146.sharecloudy.com'; // The real source
+const PORT = process.env.PORT || 3000;
 
-app.use(PROXY_PREFIX, createProxyMiddleware({
-  target: TARGET_HOST,
+// 1. Endpoint to accept sharecloudy iframe URL, fetch its HTML, extract .m3u8 link
+app.get('/get-m3u8', async (req, res) => {
+  const iframeUrl = req.query.url;
+  if (!iframeUrl) return res.status(400).send('Missing url parameter');
+
+  try {
+    // Fetch iframe page HTML
+    const response = await axios.get(iframeUrl);
+    const html = response.data;
+
+    // Extract .m3u8 URL (basic regex, may need tweaking based on actual iframe source)
+    const m3u8Match = html.match(/https?:\/\/[^"']+\.m3u8/);
+    if (!m3u8Match) return res.status(404).send('No m3u8 found');
+
+    const m3u8Url = m3u8Match[0];
+
+    // Return the proxied URL to the client
+    // Client will request /proxy?url=actual_m3u8_url to play the video with CORS bypass
+    res.json({ proxiedM3u8Url: `/proxy?url=${encodeURIComponent(m3u8Url)}` });
+
+  } catch (e) {
+    console.error(e);
+    res.status(500).send('Error fetching iframe page');
+  }
+});
+
+// 2. Proxy middleware to stream .m3u8 and .ts files with CORS headers
+app.use('/proxy', createProxyMiddleware({
+  target: 'http://dummy', // target will be rewritten dynamically
   changeOrigin: true,
-  selfHandleResponse: true, // So we can modify the playlist body
-  onProxyRes: (proxyRes, req, res) => {
-    let bodyChunks = [];
+  selfHandleResponse: false,
+  router: (req) => {
+    // Extract the real target from the ?url= query param
+    const url = req.query.url;
+    if (!url) return 'http://dummy'; // fallback
 
-    proxyRes.on('data', (chunk) => {
-      bodyChunks.push(chunk);
-    });
-
-    proxyRes.on('end', () => {
-      let body = Buffer.concat(bodyChunks);
-      let contentType = proxyRes.headers['content-type'] || '';
-
-      // If it's an m3u8 playlist, rewrite URLs inside
-      if (contentType.includes('application/vnd.apple.mpegurl') || contentType.includes('application/x-mpegURL')) {
-        let playlist = body.toString('utf8');
-
-        // Build the base URL for proxying (your server URL + /proxy)
-        const protocol = req.protocol;
-        const host = req.get('host');
-        const baseProxyUrl = `${protocol}://${host}${PROXY_PREFIX}`;
-
-        // Replace all absolute URLs that start with TARGET_HOST with your proxy URL
-        const targetHostEscaped = TARGET_HOST.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
-        const absoluteUrlRegex = new RegExp(targetHostEscaped, 'g');
-        playlist = playlist.replace(absoluteUrlRegex, baseProxyUrl);
-
-        // Rewrite relative URLs to full proxy URLs
-        playlist = playlist.replace(/^([^#][^\r\n]*)$/gm, (line) => {
-          // If line is a full URL or a comment, leave it as is
-          if (line.startsWith('http') || line.startsWith('#')) return line;
-
-          // Compose proxy path for the segment relative to current path
-          const basePath = req.path.substring(0, req.path.lastIndexOf('/') + 1);
-          return `${baseProxyUrl}${basePath}${line}`;
-        });
-
-        body = Buffer.from(playlist, 'utf8');
-      }
-
-      // Copy all headers from original response to the client
-      Object.entries(proxyRes.headers).forEach(([key, value]) => {
-        res.setHeader(key, value);
-      });
-
-      res.status(proxyRes.statusCode).send(body);
-    });
+    // Return just the origin to satisfy http-proxy-middleware (it will proxy full url via pathRewrite)
+    const urlObj = new URL(url);
+    return `${urlObj.protocol}//${urlObj.host}`;
   },
+  pathRewrite: (path, req) => {
+    // Strip /proxy and remove ?url=... param from path, then proxy the full URL path
+    const url = req.query.url;
+    if (!url) return path;
 
-  // Remove /proxy prefix when requesting the target server
-  pathRewrite: (path) => path.replace(PROXY_PREFIX, ''),
-
-  onProxyReq: (proxyReq) => {
-    // Set headers to mimic requests from sharecloudy itself, helps avoid 403
-    proxyReq.setHeader('Referer', 'https://sharecloudy.com');
-    proxyReq.setHeader('Origin', 'https://sharecloudy.com');
+    const urlObj = new URL(url);
+    return urlObj.pathname + urlObj.search;
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    // Add CORS headers to every proxied response
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', '*');
   },
 }));
 
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Proxy server listening on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
