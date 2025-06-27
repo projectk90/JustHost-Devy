@@ -1,12 +1,18 @@
 {
-  "name": "video-proxy-server",
+  "name": "proxy-server",
   "version": "1.0.0",
-  "main": "server.js",
+  "private": true,
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "node-fetch": "^2.6.7"
-  }
+    "cors": "^2.8.5",
+    "cheerio": "^1.0.0-rc.12",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "type": "module"
 }
